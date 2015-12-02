@@ -1,32 +1,40 @@
 import sys
+import csv
 from collections import namedtuple
 
 import requests
 from lxml import html
+from lxml import cssselect
 
 
 def main():
     if len(sys.argv) < 2:
-        print('usage: scraper.py TWITTER_USERNAME')
+        print('usage: scraper.py TWITTER_USERNAME [MAXID]')
         return 1
+
     username = sys.argv[1]
-    s = Scraper(username)
-    for tweet in s.timeline():
-        print(tweet)
+    try:
+        maxid = sys.argv[2]
+    except IndexError:
+        maxid = None
+
+    s = Scraper()
+    w = csv.writer(sys.stdout)
+    for tweet in s.timeline(username, maxid):
+        # print(tweet)
+        w.writerow(tweet)
 
 
 class Scraper:
-    def __init__(self, username):
-        self.username = username
+    def __init__(self):
         self.session = requests.Session()
 
-    def timeline(self, username):
-        max_position = None
+    def timeline(self, username, max_position=None):
         more = True
         while more:
             resp = self.get_timeline(username, max_position)
             tweets, max_position, more = self.extract_retweets_favorites(resp)
-            yield tweet
+            yield from tweets
 
     def get_timeline(self, username, max_position=None):
         params = {
@@ -51,25 +59,40 @@ class Scraper:
 
         tree = html.fromstring(items_html)
 
-        tweets = tree.cssselect('li div.context')
+        tweets = self._div_tweet(tree)
+        result = []
         for tweet in tweets:
-            tweet_p = tweet.cssselect('p.tweet-text')
-            text = tweet_p.text
+            tweet_id = tweet.get('data-tweet-id')
 
-            retweets_span = tweet.cssselect('span.ProfileTweet-action--retweet span.ProfileTweet-actionCount')
+            tweet_p = self._p_tweet_text(tweet)
+            if tweet_p:
+                text = tweet_p[0].text
+
+            retweets_span = self._span_retweet(tweet)
             retweets = 0
             if retweets_span:
                 retweets = int(retweets_span[0].get('data-tweet-stat-count'))
 
-            favs_span = tweet.cssselect('span.ProfileTweet-action--favorite span.ProfileTweet-actionCount')
+            favs_span = self._span_favorite(tweet)
             favs = 0
             if favs_span:
                 favs = int(favs_span[0].get('data-tweet-stat-count'))
 
-            yield Tweet(text, retweets, favs)
+            result.append(Tweet(tweet_id, text, retweets, favs))
 
+        if min_position is None:
+            min_position = min(tweet.id for tweet in result)
 
-Tweet = namedtuple('Tweet', 'tweet retweets favorites')
+        return result, min_position, has_more_items
+
+    _div_tweet = cssselect.CSSSelector('div.tweet')
+    _p_tweet_text = cssselect.CSSSelector('p.tweet-text')
+    _span_retweet = cssselect.CSSSelector(
+        'span.ProfileTweet-action--retweet span.ProfileTweet-actionCount')
+    _span_favorite = cssselect.CSSSelector(
+        'span.ProfileTweet-action--favorite span.ProfileTweet-actionCount')
+
+Tweet = namedtuple('Tweet', 'id tweet retweets favorites')
 
 if __name__ == "__main__":
     sys.exit(main())
