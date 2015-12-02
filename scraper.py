@@ -3,16 +3,17 @@ import csv
 from collections import namedtuple
 
 import requests
+from lxml import etree
 from lxml import html
 from lxml import cssselect
 
 
 def main():
     if len(sys.argv) < 2:
-        print('usage: scraper.py TWITTER_USERNAME [MAXID]')
+        print('usage: scraper.py SCREEN-NAME [MAX-ID]')
         return 1
 
-    username = sys.argv[1]
+    screen_name = sys.argv[1]
     try:
         maxid = sys.argv[2]
     except IndexError:
@@ -20,77 +21,84 @@ def main():
 
     s = Scraper()
     w = csv.writer(sys.stdout)
-    for tweet in s.timeline(username, maxid):
+    for tweet in s.timeline(screen_name, maxid):
         # print(tweet)
         w.writerow(tweet)
+        sys.stdout.flush()
 
 
 class Scraper:
     def __init__(self):
         self.session = requests.Session()
 
-    def timeline(self, username, max_position=None):
+    def timeline(self, screen_name, max_id=None):
         more = True
         while more:
-            resp = self.get_timeline(username, max_position)
-            tweets, max_position, more = self.extract_retweets_favorites(resp)
+            resp = self.get_timeline(screen_name, max_id)
+            tweets, max_id = self.extract_retweets_favorites(resp)
             yield from tweets
+            more = bool(tweets)
 
-    def get_timeline(self, username, max_position=None):
+    def get_timeline(self, screen_name, max_id=None):
         params = {
-            'include_available_features': 1,
-            'include_entities': 1,
-            'reset_error_state': 'false',
+            'screen_name': screen_name,
+            'type': 'tweets',
         }
-        if max_position is not None:
-            params['max_position'] = max_position
-        resp = self.session.get(self.__timeline_url.format(username),
-                                params=params)
+        if max_id is not None:
+            params['max_id'] = max_id
+        resp = self.session.get(self._timeline_url, params=params)
         resp.raise_for_status()
         return resp
 
-    __timeline_url = 'https://twitter.com/i/profiles/show/{}/timeline'
+    _timeline_url = 'https://mobile.twitter.com/i/rw/profile/timeline'
 
     def extract_retweets_favorites(self, timeline_resp):
-        jresp = timeline_resp.json()
-        min_position = jresp.get('min_position')
-        has_more_items = jresp['has_more_items']
-        items_html = jresp['items_html']
+        if 'json' in timeline_resp.headers['content-type']:
+            jresp = timeline_resp.json()
+            items_html = jresp['html']
+        else:
+            items_html = timeline_resp.content
 
-        tree = html.fromstring(items_html)
+        try:
+            tree = html.fromstring(items_html)
+        except etree.ParserError as e:
+            print(e, file=sys.stderr)
+            return [], None
 
         tweets = self._div_tweet(tree)
         result = []
         for tweet in tweets:
             tweet_id = tweet.get('data-tweet-id')
 
-            tweet_p = self._p_tweet_text(tweet)
+            tweet_p = self._div_tweet_text(tweet)
             if tweet_p:
                 text = tweet_p[0].text
 
             retweets_span = self._span_retweet(tweet)
             retweets = 0
             if retweets_span:
-                retweets = int(retweets_span[0].get('data-tweet-stat-count'))
+                for sib in retweets_span[0].itersiblings('span'):
+                    retweets = int(sib.text.replace(',', ''))
+                    break
 
             favs_span = self._span_favorite(tweet)
             favs = 0
             if favs_span:
-                favs = int(favs_span[0].get('data-tweet-stat-count'))
+                for sib in favs_span[0].itersiblings('span'):
+                    favs = int(sib.text.replace(',', ''))
+                    break
 
             result.append(Tweet(tweet_id, text, retweets, favs))
 
-        if min_position is None:
-            min_position = min(tweet.id for tweet in result)
+        min_position = min(tweet.id for tweet in result)
+        return result, min_position
 
-        return result, min_position, has_more_items
-
-    _div_tweet = cssselect.CSSSelector('div.tweet')
-    _p_tweet_text = cssselect.CSSSelector('p.tweet-text')
+    _div_tweet = cssselect.CSSSelector('div.Tweet')
+    _div_tweet_text = cssselect.CSSSelector('div.Tweet-text')
     _span_retweet = cssselect.CSSSelector(
-        'span.ProfileTweet-action--retweet span.ProfileTweet-actionCount')
+        'span.Icon--retweet')
     _span_favorite = cssselect.CSSSelector(
-        'span.ProfileTweet-action--favorite span.ProfileTweet-actionCount')
+        'span.Icon--heart')
 
 Tweet = namedtuple('Tweet', 'id tweet retweets favorites')
 
